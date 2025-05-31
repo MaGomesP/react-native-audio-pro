@@ -48,6 +48,7 @@ object AudioProController {
 
 	var headersAudio: Map<String, String>? = null
 	var headersArtwork: Map<String, String>? = null
+	var settingSkipIntervalSeconds: Double = 10.0
 
 	private fun log(vararg args: Any?) {
 		if (settingDebug) {
@@ -152,6 +153,11 @@ object AudioProController {
 		settingProgressIntervalMs = progressInterval
 		settingShowNextPrevControls =
 			if (options.hasKey("showNextPrevControls")) options.getBoolean("showNextPrevControls") else true
+
+		if (options.hasKey("skipInterval")) {
+			settingSkipIntervalSeconds = options.getDouble("skipInterval")
+			log("Skip interval configured: $settingSkipIntervalSeconds seconds")
+		}
 
 		log("Configured with contentType=$contentType debug=$settingDebug speed=$speed volume=$volume autoPlay=$autoPlay")
 

@@ -53,10 +53,12 @@ export const AudioPro = {
 	 * @param options.debug - Enable debug logging
 	 * @param options.debugIncludesProgress - Include progress events in debug logs
 	 * @param options.progressIntervalMs - Interval in milliseconds for progress events
+	 * @param options.skipInterval - Skip interval in seconds
 	 */
 	configure(options: AudioProConfigureOptions): void {
 		const { setConfigureOptions, setDebug, setDebugIncludesProgress } =
 			useInternalStore.getState();
+		console.log('options', options);
 		setConfigureOptions({ ...DEFAULT_CONFIG, ...options });
 		setDebug(!!options.debug);
 		setDebugIncludesProgress(options.debugIncludesProgress ?? false);
