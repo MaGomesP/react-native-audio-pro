@@ -56,6 +56,7 @@ export const AudioPro = {
 	 * @param options.debug - Enable debug logging
 	 * @param options.debugIncludesProgress - Include progress events in debug logs
 	 * @param options.progressIntervalMs - Interval in milliseconds for progress events
+	 * @param options.skipInterval - Skip interval in seconds
 	 * @param options.showNextPrevControls - Whether to show next/previous controls in notification
 	 */
 	configure(options: AudioProConfigureOptions): void {

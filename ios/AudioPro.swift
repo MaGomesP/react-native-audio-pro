@@ -70,6 +70,7 @@ class AudioPro: RCTEventEmitter {
 	private var lastEmittedState: String = ""
 	private var wasPlayingBeforeInterruption: Bool = false
 	private var pendingStartTimeMs: Double? = nil
+	private var settingSkipIntervalSeconds: Double = 10.0
 
 	////////////////////////////////////////////////////////////
 	// MARK: - React Native Event Emitter Overrides
@@ -290,6 +291,11 @@ class AudioPro: RCTEventEmitter {
 		let autoPlay = options["autoPlay"] as? Bool ?? true
 		settingShowNextPrevControls = options["showNextPrevControls"] as? Bool ?? true
 		pendingStartTimeMs = options["startTimeMs"] as? Double
+
+		if let skipInterval = options["skipInterval"] as? Double {
+			settingSkipIntervalSeconds = skipInterval
+			log("Skip interval set to", settingSkipIntervalSeconds, "seconds")
+		}
 
 		if let progressIntervalMs = options["progressIntervalMs"] as? Double {
 			let intervalSeconds = progressIntervalMs / 1000.0
@@ -1095,6 +1101,22 @@ class AudioPro: RCTEventEmitter {
 		// Enable all commands
 		commands.forEach { $0.0.isEnabled = $0.1 }
 
+		commandCenter.skipForwardCommand.addTarget { [weak self] event in
+			guard let self = self else { return .commandFailed }
+
+			let skipIntervalMs = self.settingSkipIntervalSeconds * 1000
+			self.seekForward(amount: skipIntervalMs)
+			return .success
+		}
+
+		commandCenter.skipBackwardCommand.addTarget { [weak self] event in
+			guard let self = self else { return .commandFailed }
+
+			let skipIntervalMs = self.settingSkipIntervalSeconds * 1000
+			self.seekBack(amount: skipIntervalMs)
+			return .success
+		}
+
 		// Add targets
 		commandCenter.playCommand.addTarget { [weak self] _ in
 			guard let self = self else { return .commandFailed }
@@ -1166,6 +1188,9 @@ class AudioPro: RCTEventEmitter {
 			return .success
 		}
 
+		commandCenter.skipForwardCommand.preferredIntervals = [NSNumber(value: settingSkipIntervalSeconds)]
+		commandCenter.skipBackwardCommand.preferredIntervals = [NSNumber(value: settingSkipIntervalSeconds)]
+
 		isRemoteCommandCenterSetup = true
 	}
 
@@ -1177,6 +1202,8 @@ class AudioPro: RCTEventEmitter {
 		commandCenter.nextTrackCommand.removeTarget(nil)
 		commandCenter.previousTrackCommand.removeTarget(nil)
 		commandCenter.changePlaybackPositionCommand.removeTarget(nil)
+		commandCenter.skipForwardCommand.removeTarget(nil)
+		commandCenter.skipBackwardCommand.removeTarget(nil)
 	}
 
 	////////////////////////////////////////////////////////////

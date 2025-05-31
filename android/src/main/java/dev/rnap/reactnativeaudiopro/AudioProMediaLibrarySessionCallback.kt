@@ -37,15 +37,42 @@ open class AudioProMediaLibrarySessionCallback : MediaLibraryService.MediaLibrar
 		)
 		.build()
 
+	private val skipForwardButton = CommandButton.Builder(CommandButton.ICON_SKIP_FORWARD)
+		.setDisplayName("Skip Forward")
+		.setSessionCommand(
+			SessionCommand(
+				CUSTOM_COMMAND_SKIP_FORWARD,
+				Bundle.EMPTY
+			)
+		)
+		.build()
+
+	private val skipBackwardButton = CommandButton.Builder(CommandButton.ICON_SKIP_BACK)
+		.setDisplayName("Skip Backward")
+		.setSessionCommand(
+			SessionCommand(
+				CUSTOM_COMMAND_SKIP_BACKWARD,
+				Bundle.EMPTY
+			)
+		)
+		.build()
+
 	private fun getCommandButtons(): List<CommandButton> {
-		AudioProController.log("Checking if next/prev controls are enabled")
-		return if (AudioProController.settingShowNextPrevControls) {
+		val buttons = mutableListOf<CommandButton>()
+
+		// Always provide 15-/30-second skip controls
+		buttons.add(skipBackwardButton)
+		buttons.add(skipForwardButton)
+
+		if (AudioProController.settingShowNextPrevControls) {
 			AudioProController.log("Next/Prev controls are enabled")
-			listOf(nextButton, prevButton)
+			buttons.add(nextButton)
+			buttons.add(prevButton)
 		} else {
 			AudioProController.log("Next/Prev controls are disabled")
-			emptyList()
 		}
+
+		return buttons
 	}
 
 	companion object {
@@ -53,6 +80,10 @@ open class AudioProMediaLibrarySessionCallback : MediaLibraryService.MediaLibrar
 			"dev.rnap.reactnativeaudiopro.NEXT"
 		private const val CUSTOM_COMMAND_PREV =
 			"dev.rnap.reactnativeaudiopro.PREV"
+		private const val CUSTOM_COMMAND_SKIP_FORWARD =
+			"dev.rnap.reactnativeaudiopro.SKIP_FORWARD"
+		private const val CUSTOM_COMMAND_SKIP_BACKWARD =
+			"dev.rnap.reactnativeaudiopro.SKIP_BACKWARD"
 	}
 
 	@OptIn(UnstableApi::class) // MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
@@ -83,13 +114,27 @@ open class AudioProMediaLibrarySessionCallback : MediaLibraryService.MediaLibrar
 		customCommand: SessionCommand,
 		args: Bundle,
 	): ListenableFuture<SessionResult> {
-		if (CUSTOM_COMMAND_NEXT == customCommand.customAction) {
-			AudioProController.emitNext()
-			return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
-		} else if (CUSTOM_COMMAND_PREV == customCommand.customAction) {
-			AudioProController.emitPrev()
-			return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+		when (customCommand.customAction) {
+			CUSTOM_COMMAND_NEXT -> {
+				AudioProController.emitNext()
+				return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+			}
+			CUSTOM_COMMAND_PREV -> {
+				AudioProController.emitPrev()
+				return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+			}
+			CUSTOM_COMMAND_SKIP_FORWARD -> {
+				val skipAmountMs = (AudioProController.settingSkipIntervalSeconds * 1000).toLong()
+				AudioProController.seekForward(skipAmountMs)
+				return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+			}
+			CUSTOM_COMMAND_SKIP_BACKWARD -> {
+				val skipAmountMs = (AudioProController.settingSkipIntervalSeconds * 1000).toLong()
+				AudioProController.seekBack(skipAmountMs)
+				return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+			}
 		}
+
 		return Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
 	}
 

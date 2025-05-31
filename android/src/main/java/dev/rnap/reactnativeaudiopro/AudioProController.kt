@@ -45,6 +45,7 @@ object AudioProController {
 	private var settingProgressIntervalMs: Long = 1000
 	var settingAudioContentType: Int = C.AUDIO_CONTENT_TYPE_MUSIC
 	var settingShowNextPrevControls: Boolean = true
+	var settingSkipIntervalSeconds: Double = 10.0
 
 	var headersAudio: Map<String, String>? = null
 	var headersArtwork: Map<String, String>? = null
@@ -115,6 +116,8 @@ object AudioProController {
 				.toLong() else 1000L
 		val showControls =
 			if (options.hasKey("showNextPrevControls")) options.getBoolean("showNextPrevControls") else true
+		val skipInterval =
+			if (options.hasKey("skipInterval")) options.getDouble("skipInterval") else 10.0
 
 		// Warn if showNextPrevControls is changed after session initialization
 		if (::engineBrowserFuture.isInitialized && enginerBrowser != null && showControls != settingShowNextPrevControls) {
@@ -135,6 +138,7 @@ object AudioProController {
 		activeVolume = volume
 		settingProgressIntervalMs = progressInterval
 		settingShowNextPrevControls = showControls
+		settingSkipIntervalSeconds = skipInterval
 
 		return PlaybackOptions(
 			contentType, enableDebug, includeProgressInDebug,
@@ -175,7 +179,7 @@ object AudioProController {
 			flowPendingSeekPosition = opts.startTimeMs
 		}
 
-		log("Configured with contentType=${opts.contentType} debug=${opts.enableDebug} speed=${opts.speed} volume=${opts.volume} autoPlay=${opts.autoPlay}")
+		log("Configured with contentType=${opts.contentType} debug=${opts.enableDebug} speed=${opts.speed} volume=${opts.volume} autoPlay=${opts.autoPlay} skipInterval=${opts.skipInterval}")
 
 		val url = track.getString("url") ?: run {
 			log("Missing track URL")
