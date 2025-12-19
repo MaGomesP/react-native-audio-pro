@@ -16,10 +16,28 @@ class AudioPro: RCTEventEmitter {
 	private var hasListeners = false
 	private let EVENT_NAME = "AudioProEvent"
 	private let AMBIENT_EVENT_NAME = "AudioProAmbientEvent"
+	private let QUEUE_EVENT_NAME = "AudioProQueueEvent"
 
 	private var ambientPlayer: AVPlayer?
 	private var ambientPlayerItem: AVPlayerItem?
 
+	// Queue and Crossfade properties
+	private var playerA: AVPlayer?
+	private var playerB: AVPlayer?
+	private var playerAItem: AVPlayerItem?
+	private var playerBItem: AVPlayerItem?
+	private var activePlayerIsA: Bool = true
+	private var queue: [NSDictionary] = []
+	private var currentQueueIndex: Int = 0
+	private var queuePlaybackOptions: NSDictionary?
+	private var crossfadeDurationMs: Double = 3000.0
+	private var isCrossfading: Bool = false
+	private var crossfadeTimer: Timer?
+	private var isQueueMode: Bool = false
+	private var isPlayerARateObserverAdded = false
+	private var isPlayerBRateObserverAdded = false
+	private var isPlayerAStatusObserverAdded = false
+	private var isPlayerBStatusObserverAdded = false
 
 	// Event types
 	private let EVENT_TYPE_STATE_CHANGED = "STATE_CHANGED"
@@ -30,6 +48,13 @@ class AudioPro: RCTEventEmitter {
 	private let EVENT_TYPE_REMOTE_NEXT = "REMOTE_NEXT"
 	private let EVENT_TYPE_REMOTE_PREV = "REMOTE_PREV"
 	private let EVENT_TYPE_PLAYBACK_SPEED_CHANGED = "PLAYBACK_SPEED_CHANGED"
+
+	// Queue event types
+	private let EVENT_TYPE_QUEUE_CHANGED = "QUEUE_CHANGED"
+	private let EVENT_TYPE_QUEUE_ENDED = "QUEUE_ENDED"
+	private let EVENT_TYPE_CROSSFADE_STARTED = "CROSSFADE_STARTED"
+	private let EVENT_TYPE_CROSSFADE_COMPLETED = "CROSSFADE_COMPLETED"
+	private let EVENT_TYPE_QUEUE_TRACK_CHANGED = "QUEUE_TRACK_CHANGED"
 
 	// Seek trigger sources
 	private let TRIGGER_SOURCE_USER = "USER"
@@ -78,7 +103,7 @@ class AudioPro: RCTEventEmitter {
 	////////////////////////////////////////////////////////////
 
 	override func supportedEvents() -> [String]! {
-		return [EVENT_NAME, AMBIENT_EVENT_NAME]
+		return [EVENT_NAME, AMBIENT_EVENT_NAME, QUEUE_EVENT_NAME]
 	}
 
 	override static func requiresMainQueueSetup() -> Bool {
@@ -238,6 +263,12 @@ class AudioPro: RCTEventEmitter {
 	}
 
 	private func sendProgressNoticeEvent() {
+		// Check if we're in queue mode
+		if isQueueMode {
+			sendQueueProgressNoticeEvent()
+			return
+		}
+
 		guard let player = player, let _ = player.currentItem, player.rate != 0 else { return }
 		let info = getPlaybackInfo()
 
@@ -527,10 +558,22 @@ class AudioPro: RCTEventEmitter {
 	@objc(pause)
 	func pause() {
 		shouldBePlaying = false
-		player?.pause()
+
+		// Handle queue mode
+		if isQueueMode {
+			getActivePlayer()?.pause()
+			// Also pause inactive player if crossfading
+			if isCrossfading {
+				getInactivePlayer()?.pause()
+			}
+			updateNowPlayingInfo(time: getActivePlayer()?.currentTime().seconds ?? 0, rate: 0)
+		} else {
+			player?.pause()
+			updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 0)
+		}
+
 		stopTimer()
 		sendPausedStateEvent()
-		updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 0)
 	}
 
 	@objc(resume)
@@ -547,10 +590,25 @@ class AudioPro: RCTEventEmitter {
 			// Continue anyway, as the play command might still work
 		}
 
-		player?.play()
-
-		// Ensure lock screen controls are properly updated
-		updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 1.0)
+		// Handle queue mode
+		if isQueueMode {
+			getActivePlayer()?.play()
+			// Also resume inactive player if crossfading
+			if isCrossfading {
+				getInactivePlayer()?.play()
+			}
+			// Apply playback speed
+			if currentPlaybackSpeed != 1.0 {
+				getActivePlayer()?.rate = currentPlaybackSpeed
+				if isCrossfading {
+					getInactivePlayer()?.rate = currentPlaybackSpeed
+				}
+			}
+			updateNowPlayingInfo(time: getActivePlayer()?.currentTime().seconds ?? 0, rate: 1.0)
+		} else {
+			player?.play()
+			updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 1.0)
+		}
 
 		// Note: We don't need to call sendPlayingStateEvent() here because
 		// the rate change will trigger observeValue which now calls sendPlayingStateEvent()
@@ -568,8 +626,24 @@ class AudioPro: RCTEventEmitter {
 
 		pendingStartTimeMs = nil
 
-		player?.pause()
-		player?.seek(to: .zero)
+		// Handle queue mode
+		if isQueueMode {
+			// Stop crossfade if in progress
+			crossfadeTimer?.invalidate()
+			crossfadeTimer = nil
+			isCrossfading = false
+
+			// Stop both queue players
+			getActivePlayer()?.pause()
+			getActivePlayer()?.seek(to: .zero)
+			getInactivePlayer()?.pause()
+			getInactivePlayer()?.seek(to: .zero)
+		} else {
+			// Stop single player
+			player?.pause()
+			player?.seek(to: .zero)
+		}
+
 		stopTimer()
 		// Do not set currentTrack = nil as STOPPED state should preserve track metadata
 		sendStoppedStateEvent()
@@ -600,6 +674,18 @@ class AudioPro: RCTEventEmitter {
 		activeVolume = 1.0
 
 		pendingStartTimeMs = nil
+
+		// Reset queue state to ensure clean transition back to single-track mode
+		if isQueueMode {
+			cleanupQueuePlayers()
+		}
+		isQueueMode = false
+		queue = []
+		currentQueueIndex = 0
+		isCrossfading = false
+		crossfadeTimer?.invalidate()
+		crossfadeTimer = nil
+		queuePlaybackOptions = nil
 
 		// Stop playback
 		player?.pause()
@@ -675,13 +761,21 @@ class AudioPro: RCTEventEmitter {
 
 	/// Common seek implementation used by all seek methods
 	private func performSeek(to position: Double, isAbsolute: Bool = true) {
-		guard let player = player else {
-			onError("Cannot seek: no track is playing")
+		// Get the appropriate player based on mode
+		let targetPlayer: AVPlayer?
+		if isQueueMode {
+			targetPlayer = getActivePlayer()
+		} else {
+			targetPlayer = player
+		}
+
+		guard let player = targetPlayer else {
+			log("Cannot seek: no track is playing")
 			return
 		}
 
 		guard let currentItem = player.currentItem else {
-			onError("Cannot seek: no item loaded")
+			log("Cannot seek: no item loaded")
 			return
 		}
 
@@ -690,13 +784,13 @@ class AudioPro: RCTEventEmitter {
 
 		// For relative seeking (forward/back), we need valid current time
 		if !isAbsolute && (currentTime.isNaN || currentTime.isInfinite) {
-			onError("Cannot seek: invalid track position")
+			log("Cannot seek: invalid track position")
 			return
 		}
 
 		// For all seeks, we need valid duration
 		if duration.isNaN || duration.isInfinite {
-			onError("Cannot seek: invalid track duration")
+			log("Cannot seek: invalid track duration")
 			return
 		}
 
@@ -879,10 +973,41 @@ class AudioPro: RCTEventEmitter {
 						self.pendingStartTimeMs = nil
 					}
 				case .failed:
-					if let error = item.error {
-						onError("Player item failed: \(error.localizedDescription)")
+					// In queue mode, check if this is the active player's item or the inactive (pre-buffering) player's item
+					if isQueueMode {
+						let activePlayerItem = activePlayerIsA ? playerAItem : playerBItem
+						let isActivePlayerItem = (item === activePlayerItem)
+
+						if isActivePlayerItem {
+							// Active player failed - this is a real error
+							let errorMessage = item.error?.localizedDescription ?? "Unknown error"
+							log("Queue active player item failed:", errorMessage)
+							emitPlaybackError("Player item failed: \(errorMessage)")
+							// Try to skip to next track instead of crashing everything
+							if currentQueueIndex + 1 < queue.count {
+								log("Attempting to skip to next track after error")
+								skipToNextInternal(withCrossfade: false)
+							} else {
+								// No more tracks, end the queue
+								shouldBePlaying = false
+								stopTimer()
+								sendStateEvent(state: STATE_STOPPED, position: 0, duration: 0, track: currentTrack)
+								sendQueueEvent(type: EVENT_TYPE_QUEUE_ENDED, payload: buildQueueInfoPayload())
+							}
+						} else {
+							// Inactive (pre-buffering) player failed - just log it, don't crash the current playback
+							let errorMessage = item.error?.localizedDescription ?? "Unknown error"
+							log("Queue pre-buffer player item failed (non-fatal):", errorMessage)
+							// We can emit a soft error event but don't stop playback
+							emitPlaybackError("Failed to pre-buffer next track: \(errorMessage)")
+						}
 					} else {
-						onError("Player item failed with unknown error")
+						// Not in queue mode - use original error handling
+						if let error = item.error {
+							onError("Player item failed: \(error.localizedDescription)")
+						} else {
+							onError("Player item failed with unknown error")
+						}
 					}
 				case .unknown:
 					break
@@ -892,17 +1017,43 @@ class AudioPro: RCTEventEmitter {
 			}
 		case "rate":
 			if let newRate = change?[.newKey] as? Float {
-				if newRate == 0 {
-					if shouldBePlaying && hasListeners {
-						let info = getPlaybackInfo()
-						sendStateEvent(state: STATE_LOADING, position: info.position, duration: info.duration, track: info.track)
-						stopTimer()
+				// In queue mode, only respond to rate changes from the active player
+				if isQueueMode {
+					let activePlayer = getActivePlayer()
+					let rateChangedPlayer = object as? AVPlayer
+
+					// Only handle rate changes from the active player
+					if rateChangedPlayer !== activePlayer {
+						log("Ignoring rate change from inactive queue player")
+						return
+					}
+
+					if newRate == 0 {
+						if shouldBePlaying && hasListeners && !isCrossfading {
+							let info = getQueuePlaybackInfo()
+							sendStateEvent(state: STATE_LOADING, position: info.position, duration: info.duration, track: info.track)
+							stopTimer()
+						}
+					} else {
+						if shouldBePlaying && hasListeners && !isCrossfading {
+							sendPlayingStateEvent()
+							startProgressTimer()
+						}
 					}
 				} else {
-					if shouldBePlaying && hasListeners {
-						// Use sendPlayingStateEvent to ensure lastEmittedState is updated
-						sendPlayingStateEvent()
-						startProgressTimer()
+					// Original single-player mode handling
+					if newRate == 0 {
+						if shouldBePlaying && hasListeners {
+							let info = getPlaybackInfo()
+							sendStateEvent(state: STATE_LOADING, position: info.position, duration: info.duration, track: info.track)
+							stopTimer()
+						}
+					} else {
+						if shouldBePlaying && hasListeners {
+							// Use sendPlayingStateEvent to ensure lastEmittedState is updated
+							sendPlayingStateEvent()
+							startProgressTimer()
+						}
 					}
 				}
 			}
@@ -1374,5 +1525,879 @@ class AudioPro: RCTEventEmitter {
 		}
 
 		sendEvent(withName: AMBIENT_EVENT_NAME, body: body)
+	}
+
+	////////////////////////////////////////////////////////////
+	// MARK: - Queue & Crossfade Methods
+	////////////////////////////////////////////////////////////
+
+	/**
+	 * Send a queue event to JavaScript
+	 */
+	private func sendQueueEvent(type: String, payload: [String: Any]?) {
+		guard hasListeners else { return }
+
+		var body: [String: Any] = ["type": type]
+
+		if let payload = payload {
+			body["payload"] = payload
+		}
+
+		log("Queue Event:", type)
+		sendEvent(withName: QUEUE_EVENT_NAME, body: body)
+	}
+
+	/**
+	 * Get the active player based on the current state
+	 */
+	private func getActivePlayer() -> AVPlayer? {
+		return activePlayerIsA ? playerA : playerB
+	}
+
+	/**
+	 * Get the inactive player (used for preparing next track)
+	 */
+	private func getInactivePlayer() -> AVPlayer? {
+		return activePlayerIsA ? playerB : playerA
+	}
+
+	/**
+	 * Get track at specific index in queue, or nil if out of bounds
+	 */
+	private func getQueueTrack(at index: Int) -> NSDictionary? {
+		guard index >= 0 && index < queue.count else { return nil }
+		return queue[index]
+	}
+
+	/**
+	 * Build queue info payload for events
+	 */
+	private func buildQueueInfoPayload() -> [String: Any] {
+		return [
+			"currentIndex": currentQueueIndex,
+			"queueLength": queue.count,
+			"currentTrack": getQueueTrack(at: currentQueueIndex) as Any,
+			"nextTrack": getQueueTrack(at: currentQueueIndex + 1) as Any,
+			"previousTrack": getQueueTrack(at: currentQueueIndex - 1) as Any
+		]
+	}
+
+	/**
+	 * Load a queue of tracks for playback with crossfade support
+	 */
+	@objc(loadQueue:withOptions:)
+	func loadQueue(tracks: NSArray, options: NSDictionary) {
+		log("Loading queue with", tracks.count, "tracks")
+
+		// Reset any existing queue state
+		clearQueue()
+
+		// Store the queue
+		queue = tracks.compactMap { $0 as? NSDictionary }
+		guard queue.count > 0 else {
+			onError("Cannot load empty queue")
+			return
+		}
+
+		isQueueMode = true
+		queuePlaybackOptions = options
+		currentQueueIndex = options["startIndex"] as? Int ?? 0
+
+		// Clamp startIndex to valid range
+		if currentQueueIndex < 0 || currentQueueIndex >= queue.count {
+			currentQueueIndex = 0
+		}
+
+		// Get crossfade duration (clamped between 0 and 15000ms)
+		crossfadeDurationMs = min(15000, max(0, options["crossfadeDurationMs"] as? Double ?? 3000.0))
+
+		// Extract settings from options
+		settingDebug = options["debug"] as? Bool ?? false
+		settingDebugIncludeProgress = options["debugIncludesProgress"] as? Bool ?? false
+		let autoPlay = options["autoPlay"] as? Bool ?? true
+
+		log("Queue loaded:", queue.count, "tracks, crossfade:", crossfadeDurationMs, "ms, startIndex:", currentQueueIndex)
+
+		// Setup audio session
+		do {
+			let contentType = options["contentType"] as? String ?? "MUSIC"
+			let mode: AVAudioSession.Mode = (contentType == "SPEECH") ? .spokenAudio : .default
+			try AVAudioSession.sharedInstance().setCategory(.playback, mode: mode)
+			try AVAudioSession.sharedInstance().setActive(true)
+			setupAudioSessionInterruptionObserver()
+		} catch {
+			onError("Audio session setup failed: \(error.localizedDescription)")
+			return
+		}
+
+		// Initialize both players
+		initializeQueuePlayers()
+
+		// Load and play the first track
+		loadTrackIntoPlayer(isPlayerA: true, trackIndex: currentQueueIndex, startPlayback: autoPlay)
+
+		// Pre-buffer next track if available
+		if currentQueueIndex + 1 < queue.count {
+			loadTrackIntoPlayer(isPlayerA: false, trackIndex: currentQueueIndex + 1, startPlayback: false)
+		}
+
+		// Emit queue changed event
+		sendQueueEvent(type: EVENT_TYPE_QUEUE_CHANGED, payload: buildQueueInfoPayload())
+	}
+
+	/**
+	 * Initialize both players for queue mode
+	 */
+	private func initializeQueuePlayers() {
+		// Clean up existing players
+		cleanupQueuePlayers()
+
+		// Create player instances (items will be set when loading tracks)
+		playerA = AVPlayer()
+		playerB = AVPlayer()
+
+		playerA?.volume = activeVolume
+		playerB?.volume = 0 // Start muted for crossfade
+
+		activePlayerIsA = true
+	}
+
+	/**
+	 * Load a track into a specific player
+	 */
+	private func loadTrackIntoPlayer(isPlayerA: Bool, trackIndex: Int, startPlayback: Bool) {
+		guard trackIndex >= 0 && trackIndex < queue.count else { return }
+
+		let track = queue[trackIndex]
+		guard let urlString = track["url"] as? String,
+			  let url = URL(string: urlString) else {
+			log("Invalid track URL at index", trackIndex)
+			return
+		}
+
+		let player = isPlayerA ? playerA : playerB
+
+		// Remove existing observers
+		removePlayerObservers(isPlayerA: isPlayerA)
+
+		// Create player item with headers if provided
+		let item: AVPlayerItem
+		if let headers = queuePlaybackOptions?["headers"] as? NSDictionary,
+		   let audioHeaders = headers["audio"] as? NSDictionary {
+			var headerFields = [String: String]()
+			for (key, value) in audioHeaders {
+				if let headerField = key as? String, let headerValue = value as? String {
+					headerFields[headerField] = headerValue
+				}
+			}
+			let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headerFields])
+			item = AVPlayerItem(asset: asset)
+		} else {
+			item = AVPlayerItem(url: url)
+		}
+
+		// Store item reference
+		if isPlayerA {
+			playerAItem = item
+		} else {
+			playerBItem = item
+		}
+
+		// Add observers
+		item.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
+		if isPlayerA {
+			isPlayerAStatusObserverAdded = true
+		} else {
+			isPlayerBStatusObserverAdded = true
+		}
+
+		// Replace current item
+		player?.replaceCurrentItem(with: item)
+
+		// Add rate observer
+		player?.addObserver(self, forKeyPath: "rate", options: [.new], context: nil)
+		if isPlayerA {
+			isPlayerARateObserverAdded = true
+		} else {
+			isPlayerBRateObserverAdded = true
+		}
+
+		// Add end notification
+		NotificationCenter.default.addObserver(
+			self,
+			selector: #selector(queuePlayerItemDidPlayToEndTime(_:)),
+			name: .AVPlayerItemDidPlayToEndTime,
+			object: item
+		)
+
+		log("Loaded track into player", isPlayerA ? "A" : "B", "at index", trackIndex, "startPlayback:", startPlayback)
+
+		if startPlayback {
+			shouldBePlaying = true
+			currentTrack = track
+			player?.volume = activeVolume
+			player?.play()
+
+			// Apply playback speed
+			if currentPlaybackSpeed != 1.0 {
+				player?.rate = currentPlaybackSpeed
+			}
+
+			// Update now playing info
+			updateNowPlayingInfoForQueueTrack(track)
+			setupRemoteTransportControls()
+
+			// Start progress timer
+			startProgressTimer()
+
+			// Emit state change
+			sendStateEvent(state: STATE_PLAYING, track: track)
+		}
+	}
+
+	/**
+	 * Remove observers from a player
+	 */
+	private func removePlayerObservers(isPlayerA: Bool) {
+		let player = isPlayerA ? playerA : playerB
+		let item = isPlayerA ? playerAItem : playerBItem
+
+		if isPlayerA {
+			if isPlayerARateObserverAdded {
+				player?.removeObserver(self, forKeyPath: "rate")
+				isPlayerARateObserverAdded = false
+			}
+			if isPlayerAStatusObserverAdded, let item = item {
+				item.removeObserver(self, forKeyPath: "status")
+				isPlayerAStatusObserverAdded = false
+			}
+		} else {
+			if isPlayerBRateObserverAdded {
+				player?.removeObserver(self, forKeyPath: "rate")
+				isPlayerBRateObserverAdded = false
+			}
+			if isPlayerBStatusObserverAdded, let item = item {
+				item.removeObserver(self, forKeyPath: "status")
+				isPlayerBStatusObserverAdded = false
+			}
+		}
+
+		if let item = item {
+			NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: item)
+		}
+	}
+
+	/**
+	 * Clean up queue players
+	 */
+	private func cleanupQueuePlayers() {
+		// Stop crossfade if in progress
+		crossfadeTimer?.invalidate()
+		crossfadeTimer = nil
+		isCrossfading = false
+
+		// Remove observers and stop players
+		removePlayerObservers(isPlayerA: true)
+		removePlayerObservers(isPlayerA: false)
+
+		playerA?.pause()
+		playerB?.pause()
+		playerA = nil
+		playerB = nil
+		playerAItem = nil
+		playerBItem = nil
+	}
+
+	/**
+	 * Update now playing info for a queue track
+	 */
+	private func updateNowPlayingInfoForQueueTrack(_ track: NSDictionary) {
+		var nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [String: Any]()
+
+		if let title = track["title"] as? String {
+			nowPlayingInfo[MPMediaItemPropertyTitle] = title
+		}
+		if let artist = track["artist"] as? String {
+			nowPlayingInfo[MPMediaItemPropertyArtist] = artist
+		}
+		if let album = track["album"] as? String {
+			nowPlayingInfo[MPMediaItemPropertyAlbumTitle] = album
+		}
+
+		nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0
+		nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
+
+		if let player = getActivePlayer(), let item = player.currentItem {
+			let duration = item.duration.seconds
+			if !duration.isNaN && !duration.isInfinite {
+				nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = duration
+			}
+		}
+
+		MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+
+		// Fetch artwork asynchronously
+		if let artworkUrlString = track["artwork"] as? String,
+		   let artworkUrl = URL(string: artworkUrlString) {
+			fetchArtworkAsync(url: artworkUrl)
+		}
+	}
+
+	/**
+	 * Fetch artwork asynchronously and update now playing info
+	 */
+	private func fetchArtworkAsync(url: URL) {
+		DispatchQueue.global().async { [weak self] in
+			guard let self = self else { return }
+
+			do {
+				// Check for artwork headers
+				if let headers = self.queuePlaybackOptions?["headers"] as? NSDictionary,
+				   let artworkHeaders = headers["artwork"] as? NSDictionary {
+					var request = URLRequest(url: url)
+					for (key, value) in artworkHeaders {
+						if let headerField = key as? String, let headerValue = value as? String {
+							request.setValue(headerValue, forHTTPHeaderField: headerField)
+						}
+					}
+
+					let semaphore = DispatchSemaphore(value: 0)
+					var imageData: Data? = nil
+
+					URLSession.shared.dataTask(with: request) { (data, _, _) in
+						imageData = data
+						semaphore.signal()
+					}.resume()
+
+					semaphore.wait()
+
+					if let data = imageData, let image = UIImage(data: data) {
+						let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+						DispatchQueue.main.async {
+							var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+							info[MPMediaItemPropertyArtwork] = artwork
+							MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+						}
+					}
+				} else {
+					let data = try Data(contentsOf: url)
+					if let image = UIImage(data: data) {
+						let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+						DispatchQueue.main.async {
+							var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+							info[MPMediaItemPropertyArtwork] = artwork
+							MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+						}
+					}
+				}
+			} catch {
+				self.log("Failed to fetch artwork:", error.localizedDescription)
+			}
+		}
+	}
+
+	/**
+	 * Check if crossfade should start based on current playback position
+	 */
+	private func checkForCrossfadeStart() {
+		guard isQueueMode && !isCrossfading else { return }
+		guard currentQueueIndex + 1 < queue.count else { return }
+		guard crossfadeDurationMs > 0 else { return }
+
+		guard let player = getActivePlayer(),
+			  let item = player.currentItem else { return }
+
+		let currentTime = player.currentTime().seconds
+		let duration = item.duration.seconds
+
+		guard !currentTime.isNaN && !duration.isNaN &&
+			  !currentTime.isInfinite && !duration.isInfinite else { return }
+
+		let remainingTimeMs = (duration - currentTime) * 1000
+
+		// Start crossfade when remaining time equals crossfade duration
+		if remainingTimeMs <= crossfadeDurationMs && remainingTimeMs > 0 {
+			startCrossfade()
+		}
+	}
+
+	/**
+	 * Start crossfade transition to next track
+	 */
+	private func startCrossfade() {
+		guard !isCrossfading else {
+			log("Crossfade already in progress, ignoring")
+			return
+		}
+		guard currentQueueIndex + 1 < queue.count else {
+			log("No next track available for crossfade")
+			return
+		}
+
+		let activePlayer = getActivePlayer()
+		let inactivePlayer = getInactivePlayer()
+
+		guard let activePlayer = activePlayer, let inactivePlayer = inactivePlayer else {
+			log("Missing player reference for crossfade")
+			return
+		}
+
+		// Check if inactive player has a loaded item
+		guard let inactiveItem = inactivePlayer.currentItem else {
+			log("Inactive player has no item loaded, loading now")
+			loadTrackIntoPlayer(isPlayerA: !activePlayerIsA, trackIndex: currentQueueIndex + 1, startPlayback: false)
+			// Retry crossfade after a short delay to allow loading
+			DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+				self?.startCrossfade()
+			}
+			return
+		}
+
+		// Check if inactive player item is ready
+		if inactiveItem.status != .readyToPlay {
+			log("Inactive player item not ready (status: \(inactiveItem.status.rawValue)), waiting...")
+			// Retry crossfade after a short delay
+			DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+				self?.startCrossfade()
+			}
+			return
+		}
+
+		isCrossfading = true
+		log("Starting crossfade from index", currentQueueIndex, "to", currentQueueIndex + 1)
+
+		// Emit crossfade started event
+		sendQueueEvent(type: EVENT_TYPE_CROSSFADE_STARTED, payload: [
+			"fromIndex": currentQueueIndex,
+			"toIndex": currentQueueIndex + 1,
+			"fromTrack": queue[currentQueueIndex],
+			"toTrack": queue[currentQueueIndex + 1]
+		])
+
+		// Start the inactive player
+		inactivePlayer.volume = 0
+		inactivePlayer.play()
+
+		// Apply playback speed to inactive player
+		if currentPlaybackSpeed != 1.0 {
+			inactivePlayer.rate = currentPlaybackSpeed
+		}
+
+		// Animate crossfade on main thread
+		let fadeDuration = crossfadeDurationMs / 1000.0
+		let steps = 30
+		let interval = fadeDuration / Double(steps)
+
+		crossfadeTimer?.invalidate()
+
+		DispatchQueue.main.async { [weak self] in
+			guard let self = self else { return }
+
+			var currentStep = 0
+
+			self.crossfadeTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] timer in
+				guard let self = self else {
+					timer.invalidate()
+					return
+				}
+
+				currentStep += 1
+				let progress = Float(currentStep) / Float(steps)
+
+				self.log("Crossfade step", currentStep, "/", steps, "progress:", progress)
+
+				// Fade out active, fade in inactive
+				activePlayer.volume = self.activeVolume * (1.0 - progress)
+				inactivePlayer.volume = self.activeVolume * progress
+
+				if currentStep >= steps {
+					timer.invalidate()
+					self.log("Crossfade timer completed, calling completeCrossfade")
+					self.completeCrossfade()
+				}
+			}
+
+			// Ensure timer is added to run loop
+			if let timer = self.crossfadeTimer {
+				RunLoop.current.add(timer, forMode: .common)
+			}
+		}
+	}
+
+	/**
+	 * Complete the crossfade transition
+	 */
+	private func completeCrossfade() {
+		let previousPlayer = getActivePlayer()
+
+		// Swap active player
+		activePlayerIsA = !activePlayerIsA
+		currentQueueIndex += 1
+		currentTrack = queue[currentQueueIndex]
+
+		// Ensure volumes are correct
+		getActivePlayer()?.volume = activeVolume
+		previousPlayer?.volume = 0
+
+		// Stop and reset previous player
+		previousPlayer?.pause()
+		previousPlayer?.seek(to: .zero)
+
+		isCrossfading = false
+		crossfadeTimer = nil
+
+		log("Crossfade completed, now at index", currentQueueIndex)
+
+		// Update now playing info
+		if let track = currentTrack {
+			updateNowPlayingInfoForQueueTrack(track)
+		}
+
+		// Reset lastEmittedState to allow PLAYING to be emitted for the new track
+		lastEmittedState = ""
+
+		// Emit PLAYING state for the new track
+		sendStateEvent(state: STATE_PLAYING, track: currentTrack)
+
+		// Emit queue events
+		sendQueueEvent(type: EVENT_TYPE_CROSSFADE_COMPLETED, payload: buildQueueInfoPayload())
+		sendQueueEvent(type: EVENT_TYPE_QUEUE_TRACK_CHANGED, payload: buildQueueInfoPayload())
+
+		// Pre-buffer next track if available
+		if currentQueueIndex + 1 < queue.count {
+			loadTrackIntoPlayer(isPlayerA: !activePlayerIsA, trackIndex: currentQueueIndex + 1, startPlayback: false)
+		}
+	}
+
+	/**
+	 * Handle queue player item did play to end time
+	 */
+	@objc private func queuePlayerItemDidPlayToEndTime(_ notification: Notification) {
+		guard isQueueMode else { return }
+
+		// If crossfade is in progress, let it complete naturally
+		if isCrossfading {
+			return
+		}
+
+		log("Queue track ended at index", currentQueueIndex)
+
+		// Check if there's a next track
+		if currentQueueIndex + 1 < queue.count {
+			// Move to next track without crossfade (track ended naturally)
+			skipToNextInternal(withCrossfade: false)
+		} else {
+			// Queue has ended
+			log("Queue ended")
+			shouldBePlaying = false
+			stopTimer()
+			updateNowPlayingInfo(time: 0, rate: 0)
+			sendStateEvent(state: STATE_STOPPED, position: 0, duration: 0, track: currentTrack)
+			sendQueueEvent(type: EVENT_TYPE_QUEUE_ENDED, payload: buildQueueInfoPayload())
+		}
+	}
+
+	/**
+	 * Skip to next track in queue
+	 */
+	@objc(skipToNext)
+	func skipToNext() {
+		guard isQueueMode else {
+			log("skipToNext ignored - not in queue mode")
+			return
+		}
+
+		skipToNextInternal(withCrossfade: crossfadeDurationMs > 0)
+	}
+
+	/**
+	 * Internal method to skip to next track with optional crossfade
+	 */
+	private func skipToNextInternal(withCrossfade: Bool) {
+		guard currentQueueIndex + 1 < queue.count else {
+			log("skipToNext ignored - already at last track")
+			return
+		}
+
+		if withCrossfade && !isCrossfading {
+			startCrossfade()
+		} else if !isCrossfading {
+			// Immediate transition without crossfade
+			let previousPlayer = getActivePlayer()
+			previousPlayer?.pause()
+			previousPlayer?.seek(to: .zero)
+
+			activePlayerIsA = !activePlayerIsA
+			currentQueueIndex += 1
+			currentTrack = queue[currentQueueIndex]
+
+			// Load and play new track
+			loadTrackIntoPlayer(isPlayerA: activePlayerIsA, trackIndex: currentQueueIndex, startPlayback: shouldBePlaying)
+
+			// Pre-buffer next track
+			if currentQueueIndex + 1 < queue.count {
+				loadTrackIntoPlayer(isPlayerA: !activePlayerIsA, trackIndex: currentQueueIndex + 1, startPlayback: false)
+			}
+
+			sendQueueEvent(type: EVENT_TYPE_QUEUE_TRACK_CHANGED, payload: buildQueueInfoPayload())
+		}
+	}
+
+	/**
+	 * Skip to previous track in queue
+	 */
+	@objc(skipToPrevious)
+	func skipToPrevious() {
+		guard isQueueMode else {
+			log("skipToPrevious ignored - not in queue mode")
+			return
+		}
+
+		guard currentQueueIndex > 0 else {
+			// At first track, just seek to beginning
+			getActivePlayer()?.seek(to: .zero)
+			return
+		}
+
+		// Cancel any ongoing crossfade
+		crossfadeTimer?.invalidate()
+		crossfadeTimer = nil
+		isCrossfading = false
+
+		let previousPlayer = getActivePlayer()
+		previousPlayer?.pause()
+		previousPlayer?.volume = 0
+
+		activePlayerIsA = !activePlayerIsA
+		currentQueueIndex -= 1
+		currentTrack = queue[currentQueueIndex]
+
+		// Load and play previous track
+		loadTrackIntoPlayer(isPlayerA: activePlayerIsA, trackIndex: currentQueueIndex, startPlayback: shouldBePlaying)
+
+		// Pre-buffer next track (which is the one we just left)
+		loadTrackIntoPlayer(isPlayerA: !activePlayerIsA, trackIndex: currentQueueIndex + 1, startPlayback: false)
+
+		sendQueueEvent(type: EVENT_TYPE_QUEUE_TRACK_CHANGED, payload: buildQueueInfoPayload())
+	}
+
+	/**
+	 * Skip to a specific index in the queue
+	 */
+	@objc(skipToQueueIndex:)
+	func skipToQueueIndex(index: Int) {
+		guard isQueueMode else {
+			log("skipToQueueIndex ignored - not in queue mode")
+			return
+		}
+
+		guard index >= 0 && index < queue.count else {
+			log("skipToQueueIndex ignored - index out of bounds")
+			return
+		}
+
+		if index == currentQueueIndex {
+			// Same track, just seek to beginning
+			getActivePlayer()?.seek(to: .zero)
+			return
+		}
+
+		// Cancel any ongoing crossfade
+		crossfadeTimer?.invalidate()
+		crossfadeTimer = nil
+		isCrossfading = false
+
+		let previousPlayer = getActivePlayer()
+		previousPlayer?.pause()
+		previousPlayer?.volume = 0
+
+		activePlayerIsA = !activePlayerIsA
+		currentQueueIndex = index
+		currentTrack = queue[currentQueueIndex]
+
+		// Load and play the track at the specified index
+		loadTrackIntoPlayer(isPlayerA: activePlayerIsA, trackIndex: currentQueueIndex, startPlayback: shouldBePlaying)
+
+		// Pre-buffer next track if available
+		if currentQueueIndex + 1 < queue.count {
+			loadTrackIntoPlayer(isPlayerA: !activePlayerIsA, trackIndex: currentQueueIndex + 1, startPlayback: false)
+		}
+
+		sendQueueEvent(type: EVENT_TYPE_QUEUE_TRACK_CHANGED, payload: buildQueueInfoPayload())
+	}
+
+	/**
+	 * Set the crossfade duration
+	 */
+	@objc(setCrossfadeDuration:)
+	func setCrossfadeDuration(durationMs: Double) {
+		crossfadeDurationMs = min(15000, max(0, durationMs))
+		log("Crossfade duration set to", crossfadeDurationMs, "ms")
+	}
+
+	/**
+	 * Get current queue info
+	 */
+	@objc(getQueueInfo:rejecter:)
+	func getQueueInfo(resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+		let info: [String: Any] = [
+			"queue": queue,
+			"currentIndex": currentQueueIndex,
+			"queueLength": queue.count,
+			"crossfadeDurationMs": crossfadeDurationMs,
+			"isQueueMode": isQueueMode,
+			"isCrossfading": isCrossfading
+		]
+		resolver(info)
+	}
+
+	/**
+	 * Clear the queue and reset to single-track mode
+	 */
+	@objc(clearQueue)
+	func clearQueue() {
+		log("Clearing queue")
+
+		// Stop crossfade if in progress
+		crossfadeTimer?.invalidate()
+		crossfadeTimer = nil
+		isCrossfading = false
+
+		// Clean up queue players
+		cleanupQueuePlayers()
+
+		// Reset queue state
+		queue = []
+		currentQueueIndex = 0
+		queuePlaybackOptions = nil
+		isQueueMode = false
+
+		// Reset to using the main single player
+		activePlayerIsA = true
+	}
+
+	/**
+	 * Pause queue playback
+	 */
+	@objc(queuePause)
+	func queuePause() {
+		guard isQueueMode else { return }
+
+		shouldBePlaying = false
+		getActivePlayer()?.pause()
+
+		// Also pause inactive player if crossfading
+		if isCrossfading {
+			getInactivePlayer()?.pause()
+		}
+
+		stopTimer()
+		sendPausedStateEvent()
+		updateNowPlayingInfo(time: getActivePlayer()?.currentTime().seconds ?? 0, rate: 0)
+	}
+
+	/**
+	 * Resume queue playback
+	 */
+	@objc(queueResume)
+	func queueResume() {
+		guard isQueueMode else { return }
+
+		shouldBePlaying = true
+
+		do {
+			if !AVAudioSession.sharedInstance().isOtherAudioPlaying {
+				try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
+			}
+		} catch {
+			log("Failed to reactivate audio session:", error.localizedDescription)
+		}
+
+		getActivePlayer()?.play()
+
+		// Also resume inactive player if crossfading
+		if isCrossfading {
+			getInactivePlayer()?.play()
+		}
+
+		// Apply playback speed
+		if currentPlaybackSpeed != 1.0 {
+			getActivePlayer()?.rate = currentPlaybackSpeed
+			if isCrossfading {
+				getInactivePlayer()?.rate = currentPlaybackSpeed
+			}
+		}
+
+		startProgressTimer()
+		sendPlayingStateEvent()
+		updateNowPlayingInfo(time: getActivePlayer()?.currentTime().seconds ?? 0, rate: 1.0)
+	}
+
+	/**
+	 * Seek within current queue track
+	 */
+	@objc(queueSeekTo:)
+	func queueSeekTo(positionMs: Double) {
+		guard isQueueMode else { return }
+		guard let player = getActivePlayer() else { return }
+
+		let position = positionMs / 1000.0
+		let time = CMTime(seconds: position, preferredTimescale: 1000)
+
+		player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] completed in
+			guard let self = self, completed else { return }
+			self.updateNowPlayingInfoWithCurrentTime(position)
+
+			if self.hasListeners {
+				let info = self.getPlaybackInfo()
+				let payload: [String: Any] = [
+					"position": Int(positionMs),
+					"duration": info.duration,
+					"triggeredBy": self.TRIGGER_SOURCE_USER
+				]
+				self.sendEvent(type: self.EVENT_TYPE_SEEK_COMPLETE, track: self.currentTrack, payload: payload)
+			}
+		}
+	}
+
+	/**
+	 * Override progress timer to check for crossfade
+	 */
+	private func sendQueueProgressNoticeEvent() {
+		guard isQueueMode else { return }
+		guard let player = getActivePlayer(), player.rate != 0 else { return }
+
+		// Check if crossfade should start
+		checkForCrossfadeStart()
+
+		// Send regular progress event
+		let info = getQueuePlaybackInfo()
+		let payload: [String: Any] = [
+			"position": info.position,
+			"duration": info.duration
+		]
+		sendEvent(type: EVENT_TYPE_PROGRESS, track: info.track, payload: payload)
+	}
+
+	/**
+	 * Get playback info for queue mode
+	 */
+	private func getQueuePlaybackInfo() -> (position: Int, duration: Int, track: NSDictionary?) {
+		guard let player = getActivePlayer(), let currentItem = player.currentItem else {
+			return (0, 0, currentTrack)
+		}
+
+		let currentTimeSec = player.currentTime().seconds
+		let durationSec = currentItem.duration.seconds
+		let validCurrentTimeSec = (currentTimeSec.isNaN || currentTimeSec.isInfinite) ? 0 : currentTimeSec
+		let validDurationSec = (durationSec.isNaN || durationSec.isInfinite) ? 0 : durationSec
+
+		let positionMs = Int(round(validCurrentTimeSec * 1000))
+		let durationMs = Int(round(validDurationSec * 1000))
+
+		let sanitizedPositionMs = positionMs < 0 ? 0 : positionMs
+		let sanitizedDurationMs = durationMs < 0 ? 0 : durationMs
+
+		return (position: sanitizedPositionMs, duration: sanitizedDurationMs, track: currentTrack)
 	}
 }

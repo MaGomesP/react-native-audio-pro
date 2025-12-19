@@ -23,14 +23,32 @@ import { playlist } from './playlist';
 import { styles } from './styles';
 import { formatTime, getStateColor } from './utils';
 import { AudioPro } from '../../src/audioPro';
-import { AudioProState } from '../../src/values';
+import { AudioProState, AudioProQueueEventType } from '../../src/values';
 
 export default function App() {
 	const [currentIndex, setLocalIndex] = useState(getCurrentTrackIndex());
 	const [progressInterval, setLocalProgressInterval] = useState(getProgressInterval());
-	const currentTrack = playlist[currentIndex];
-	const { position, duration, state, playingTrack, playbackSpeed, volume, error } = useAudioPro();
+	const localTrack = playlist[currentIndex];
+	const {
+		position,
+		duration,
+		state,
+		playingTrack,
+		playbackSpeed,
+		volume,
+		error,
+		queue,
+		currentQueueIndex,
+		isCrossfading,
+	} = useAudioPro();
 	const [ambientState, setAmbientState] = useState<'stopped' | 'playing' | 'paused'>('stopped');
+
+	// Queue mode state
+	const [isQueueMode, setIsQueueMode] = useState(false);
+	const [localCrossfadeDuration, setLocalCrossfadeDuration] = useState(3000);
+
+	// Use playingTrack when in queue mode, otherwise use local playlist track
+	const currentTrack = isQueueMode && playingTrack ? playingTrack : localTrack;
 
 	// Sync the local index with the player service
 	useEffect(() => {
@@ -74,9 +92,34 @@ export default function App() {
 			}
 		});
 
+		// Add queue event listeners
+		const queueListener = AudioPro.addQueueListener((event) => {
+			console.log('Queue event:', event.type, event.payload);
+
+			switch (event.type) {
+				case AudioProQueueEventType.CROSSFADE_STARTED:
+					console.log('🎵 Crossfade started!');
+					break;
+
+				case AudioProQueueEventType.CROSSFADE_COMPLETED:
+					console.log('✅ Crossfade completed!');
+					break;
+
+				case AudioProQueueEventType.QUEUE_TRACK_CHANGED:
+					console.log('📀 Track changed to index:', event.payload?.currentIndex);
+					break;
+
+				case AudioProQueueEventType.QUEUE_ENDED:
+					console.log('🏁 Queue ended!');
+					setIsQueueMode(false);
+					break;
+			}
+		});
+
 		// Clean up listeners when component unmounts
 		return () => {
 			ambientListener.remove();
+			queueListener.remove();
 		};
 	}, []);
 
@@ -118,6 +161,7 @@ export default function App() {
 	};
 
 	const handleClear = () => {
+		AudioPro.stop();
 		AudioPro.clear();
 		setNeedsTrackLoad(true);
 	};
@@ -235,6 +279,8 @@ export default function App() {
 			setAmbientState('playing');
 		}
 	};
+
+	console.log('state', state);
 
 	return (
 		<SafeAreaView style={styles.container}>
@@ -371,6 +417,124 @@ export default function App() {
 							<Text style={styles.controlText}>ambientStop()</Text>
 						</TouchableOpacity>
 					</View>
+				</View>
+
+				{/* Queue with Crossfade Section */}
+				<View style={styles.ambientSection}>
+					<Text style={styles.sectionTitle}>Queue with Crossfade</Text>
+
+					{/* Crossfade Duration Control */}
+					<View style={styles.speedRow}>
+						<TouchableOpacity
+							onPress={() =>
+								setLocalCrossfadeDuration(
+									Math.max(0, localCrossfadeDuration - 1000),
+								)
+							}
+						>
+							<Text style={styles.controlText}>-1s</Text>
+						</TouchableOpacity>
+						<Text style={styles.speedText}>
+							Crossfade: {localCrossfadeDuration / 1000}s
+						</Text>
+						<TouchableOpacity
+							onPress={() =>
+								setLocalCrossfadeDuration(
+									Math.min(15000, localCrossfadeDuration + 1000),
+								)
+							}
+						>
+							<Text style={styles.controlText}>+1s</Text>
+						</TouchableOpacity>
+					</View>
+
+					{/* Queue Controls */}
+					<View style={styles.stopRow}>
+						{!isQueueMode || queue.length === 0 ? (
+							<TouchableOpacity
+								onPress={() => {
+									AudioPro.loadQueue(playlist as AudioProTrack[], {
+										crossfadeDurationMs: localCrossfadeDuration,
+										autoPlay: true,
+									});
+									setIsQueueMode(true);
+								}}
+							>
+								<Text style={styles.controlText}>loadQueue()</Text>
+							</TouchableOpacity>
+						) : (
+							<TouchableOpacity
+								onPress={() => {
+									AudioPro.clearQueue();
+									AudioPro.stop();
+									AudioPro.clear();
+									setIsQueueMode(false);
+								}}
+							>
+								<Text style={styles.controlText}>clearQueue()</Text>
+							</TouchableOpacity>
+						)}
+					</View>
+
+					{/* Queue Navigation */}
+					{isQueueMode && queue.length > 0 && (
+						<>
+							<View style={styles.controlsRow}>
+								<TouchableOpacity onPress={() => AudioPro.skipToPrevious()}>
+									<Text style={styles.controlText}>skipToPrev()</Text>
+								</TouchableOpacity>
+								{state === AudioProState.PLAYING ? (
+									<TouchableOpacity onPress={() => AudioPro.queuePause()}>
+										<Text style={styles.controlText}>queuePause()</Text>
+									</TouchableOpacity>
+								) : (
+									<TouchableOpacity onPress={() => AudioPro.queueResume()}>
+										<Text style={styles.controlText}>queueResume()</Text>
+									</TouchableOpacity>
+								)}
+								<TouchableOpacity onPress={() => AudioPro.skipToNext()}>
+									<Text style={styles.controlText}>skipToNext()</Text>
+								</TouchableOpacity>
+							</View>
+
+							{/* Queue Status */}
+							<View style={styles.stopRow}>
+								<Text style={styles.optionText}>
+									Track: {currentQueueIndex + 1} / {queue.length}
+								</Text>
+								<Text
+									style={[
+										styles.optionText,
+										// eslint-disable-next-line react-native/no-inline-styles
+										{ color: isCrossfading ? '#90EE90' : '#888' },
+									]}
+								>
+									{isCrossfading ? '🔀 Crossfading...' : 'Ready'}
+								</Text>
+							</View>
+
+							{/* Jump to specific track */}
+							<View style={styles.controlsRow}>
+								{playlist.map((_, idx) => (
+									<TouchableOpacity
+										key={idx}
+										onPress={() => AudioPro.skipToQueueIndex(idx)}
+										// eslint-disable-next-line react-native/no-inline-styles
+										style={{
+											backgroundColor:
+												idx === currentQueueIndex ? '#1EB1FC' : '#333',
+											paddingHorizontal: 12,
+											paddingVertical: 6,
+											borderRadius: 4,
+											marginHorizontal: 4,
+										}}
+									>
+										<Text style={styles.controlText}>{idx + 1}</Text>
+									</TouchableOpacity>
+								))}
+							</View>
+						</>
+					)}
 				</View>
 
 				{error && (

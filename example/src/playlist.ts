@@ -21,11 +21,11 @@ export const playlist: Track[] = [
 		artwork: 'https://rnap.dev/artwork-usgs-8tfu4320oxI-unsplash.jpg',
 		artist: 'T. Schurger',
 	},
-	{
-		id: 'error-track-1',
-		url: 'https://error',
-		title: 'This track should error',
-		artwork: 'https://error',
-		artist: 'For test purposes',
-	},
+	// {
+	// 	id: 'error-track-1',
+	// 	url: 'https://error',
+	// 	title: 'This track should error',
+	// 	artwork: 'https://error',
+	// 	artist: 'For test purposes',
+	// },
 ];

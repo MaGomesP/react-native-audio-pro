@@ -31,6 +31,7 @@ export const styles = StyleSheet.create({
 		alignItems: 'center',
 		justifyContent: 'center',
 		padding: needsSmallerUI ? 12 : 20,
+		paddingBottom: 100,
 	},
 	artwork: {
 		width: 360 * artworkScale, // Increased by 20%

@@ -1,12 +1,19 @@
 import { create } from 'zustand';
 
 import { normalizeVolume } from './utils';
-import { AudioProEventType, AudioProState, DEFAULT_CONFIG } from './values';
+import {
+	AudioProEventType,
+	AudioProQueueEventType,
+	AudioProState,
+	DEFAULT_CONFIG,
+	DEFAULT_CROSSFADE_DURATION_MS,
+} from './values';
 
 import type {
 	AudioProConfigureOptions,
 	AudioProEvent,
 	AudioProPlaybackErrorPayload,
+	AudioProQueueEvent,
 	AudioProTrack,
 } from './types';
 
@@ -21,6 +28,12 @@ export interface AudioProStore {
 	trackPlaying: AudioProTrack | null;
 	configureOptions: AudioProConfigureOptions;
 	error: AudioProPlaybackErrorPayload | null;
+	// Queue state
+	queue: AudioProTrack[];
+	currentQueueIndex: number;
+	crossfadeDurationMs: number;
+	isCrossfading: boolean;
+	// Actions
 	setDebug: (debug: boolean) => void;
 	setDebugIncludesProgress: (includeProgress: boolean) => void;
 	setTrackPlaying: (track: AudioProTrack | null) => void;
@@ -28,7 +41,14 @@ export interface AudioProStore {
 	setPlaybackSpeed: (speed: number) => void;
 	setVolume: (volume: number) => void;
 	setError: (error: AudioProPlaybackErrorPayload | null) => void;
+	// Queue actions
+	setQueue: (tracks: AudioProTrack[]) => void;
+	setCurrentQueueIndex: (index: number) => void;
+	setCrossfadeDurationMs: (duration: number) => void;
+	setIsCrossfading: (isCrossfading: boolean) => void;
+	clearQueue: () => void;
 	updateFromEvent: (event: AudioProEvent) => void;
+	updateFromQueueEvent: (event: AudioProQueueEvent) => void;
 }
 
 export const internalStore = create<AudioProStore>((set, get) => ({
@@ -42,6 +62,12 @@ export const internalStore = create<AudioProStore>((set, get) => ({
 	trackPlaying: null,
 	configureOptions: { ...DEFAULT_CONFIG },
 	error: null,
+	// Queue state
+	queue: [],
+	currentQueueIndex: 0,
+	crossfadeDurationMs: DEFAULT_CROSSFADE_DURATION_MS,
+	isCrossfading: false,
+	// Actions
 	setDebug: (debug) => set({ debug }),
 	setDebugIncludesProgress: (includeProgress) => set({ debugIncludesProgress: includeProgress }),
 	setTrackPlaying: (track) => set({ trackPlaying: track }),
@@ -49,6 +75,12 @@ export const internalStore = create<AudioProStore>((set, get) => ({
 	setPlaybackSpeed: (speed) => set({ playbackSpeed: speed }),
 	setVolume: (volume) => set({ volume: normalizeVolume(volume) }),
 	setError: (error) => set({ error }),
+	// Queue actions
+	setQueue: (tracks) => set({ queue: tracks, currentQueueIndex: 0 }),
+	setCurrentQueueIndex: (index) => set({ currentQueueIndex: index }),
+	setCrossfadeDurationMs: (duration) => set({ crossfadeDurationMs: duration }),
+	setIsCrossfading: (isCrossfading) => set({ isCrossfading }),
+	clearQueue: () => set({ queue: [], currentQueueIndex: 0, isCrossfading: false }),
 	updateFromEvent: (event) => {
 		// Early exit for simple remote commands (no state change)
 		if (
@@ -77,6 +109,12 @@ export const internalStore = create<AudioProStore>((set, get) => ({
 			// Clear error when leaving ERROR state
 			if (payload.state !== AudioProState.ERROR && current.error !== null) {
 				updates.error = null;
+			}
+			// Clear queue state when transitioning to IDLE (e.g., after clear())
+			if (payload.state === AudioProState.IDLE && current.queue.length > 0) {
+				updates.queue = [];
+				updates.currentQueueIndex = 0;
+				updates.isCrossfading = false;
 			}
 		}
 
@@ -147,6 +185,52 @@ export const internalStore = create<AudioProStore>((set, get) => ({
 		}
 
 		// 6. Apply batched updates
+		if (Object.keys(updates).length > 0) {
+			set(updates);
+		}
+	},
+	updateFromQueueEvent: (event) => {
+		const { type, payload } = event;
+		const updates: Partial<AudioProStore> = {};
+
+		switch (type) {
+			case AudioProQueueEventType.QUEUE_CHANGED:
+				if (payload?.currentIndex !== undefined) {
+					updates.currentQueueIndex = payload.currentIndex;
+				}
+				if (payload?.currentTrack) {
+					updates.trackPlaying = payload.currentTrack;
+				}
+				break;
+
+			case AudioProQueueEventType.QUEUE_TRACK_CHANGED:
+				if (payload?.currentIndex !== undefined) {
+					updates.currentQueueIndex = payload.currentIndex;
+				}
+				if (payload?.currentTrack) {
+					updates.trackPlaying = payload.currentTrack;
+				}
+				break;
+
+			case AudioProQueueEventType.CROSSFADE_STARTED:
+				updates.isCrossfading = true;
+				break;
+
+			case AudioProQueueEventType.CROSSFADE_COMPLETED:
+				updates.isCrossfading = false;
+				if (payload?.currentIndex !== undefined) {
+					updates.currentQueueIndex = payload.currentIndex;
+				}
+				if (payload?.currentTrack) {
+					updates.trackPlaying = payload.currentTrack;
+				}
+				break;
+
+			case AudioProQueueEventType.QUEUE_ENDED:
+				updates.isCrossfading = false;
+				break;
+		}
+
 		if (Object.keys(updates).length > 0) {
 			set(updates);
 		}

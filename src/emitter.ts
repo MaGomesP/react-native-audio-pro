@@ -4,7 +4,7 @@ import { internalStore } from './internalStore';
 import { logDebug } from './utils';
 import { AudioProEventType } from './values';
 
-import type { AudioProEvent } from './types';
+import type { AudioProEvent, AudioProQueueEvent } from './types';
 
 const NativeAudioPro = NativeModules.AudioPro;
 
@@ -20,6 +20,13 @@ export const emitter =
  * Used to communicate between native code and JavaScript
  */
 export const ambientEmitter =
+	Platform.OS === 'android' ? DeviceEventEmitter : new NativeEventEmitter(NativeAudioPro);
+
+/**
+ * Event emitter for queue events
+ * Used to communicate queue-related events between native code and JavaScript
+ */
+export const queueEmitter =
 	Platform.OS === 'android' ? DeviceEventEmitter : new NativeEventEmitter(NativeAudioPro);
 
 /**
@@ -45,4 +52,16 @@ ambientEmitter.addListener('AudioProAmbientEvent', (event) => {
 	if (debug) {
 		logDebug('AudioProAmbientEvent', JSON.stringify(event));
 	}
+});
+
+/**
+ * Global listener for queue events
+ * Handles debug logging and state updates
+ */
+queueEmitter.addListener('AudioProQueueEvent', (event: AudioProQueueEvent) => {
+	const { debug, updateFromQueueEvent } = internalStore.getState();
+	if (debug) {
+		logDebug('AudioProQueueEvent', JSON.stringify(event));
+	}
+	updateFromQueueEvent(event);
 });

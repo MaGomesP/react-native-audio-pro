@@ -21,6 +21,18 @@ RCT_EXTERN_METHOD(ambientPause)
 RCT_EXTERN_METHOD(ambientResume)
 RCT_EXTERN_METHOD(ambientSeekTo:(double)positionMs)
 
+// Queue methods
+RCT_EXTERN_METHOD(loadQueue:(NSArray *)tracks withOptions:(NSDictionary *)options)
+RCT_EXTERN_METHOD(skipToNext)
+RCT_EXTERN_METHOD(skipToPrevious)
+RCT_EXTERN_METHOD(skipToQueueIndex:(int)index)
+RCT_EXTERN_METHOD(setCrossfadeDuration:(double)durationMs)
+RCT_EXTERN_METHOD(getQueueInfo:(RCTPromiseResolveBlock)resolver rejecter:(RCTPromiseRejectBlock)rejecter)
+RCT_EXTERN_METHOD(clearQueue)
+RCT_EXTERN_METHOD(queuePause)
+RCT_EXTERN_METHOD(queueResume)
+RCT_EXTERN_METHOD(queueSeekTo:(double)positionMs)
+
 + (BOOL)requiresMainQueueSetup
 {
   return NO;

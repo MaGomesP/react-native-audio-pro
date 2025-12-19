@@ -1,6 +1,6 @@
-import { NativeModules } from 'react-native';
+import { NativeModules, Platform } from 'react-native';
 
-import { ambientEmitter, emitter } from './emitter';
+import { ambientEmitter, emitter, queueEmitter } from './emitter';
 import { internalStore } from './internalStore';
 import {
 	guardTrackPlaying,
@@ -12,9 +12,12 @@ import {
 import {
 	AudioProAmbientEventType,
 	AudioProEventType,
+	AudioProQueueEventType,
 	AudioProState,
 	DEFAULT_CONFIG,
+	DEFAULT_CROSSFADE_DURATION_MS,
 	DEFAULT_SEEK_MS,
+	MAX_CROSSFADE_DURATION_MS,
 } from './values';
 
 import type {
@@ -23,6 +26,8 @@ import type {
 	AudioProConfigureOptions,
 	AudioProEventCallback,
 	AudioProPlayOptions,
+	AudioProQueueEventCallback,
+	AudioProQueueOptions,
 	AudioProTrack,
 } from './types';
 
@@ -498,5 +503,323 @@ export const AudioPro = {
 	 */
 	addAmbientListener(callback: AudioProAmbientEventCallback) {
 		return ambientEmitter.addListener('AudioProAmbientEvent', callback);
+	},
+
+	// ==============================
+	// QUEUE METHODS (iOS only for now)
+	// ==============================
+
+	/**
+	 * Load a queue of tracks for playback with crossfade support
+	 * Note: Currently only available on iOS
+	 *
+	 * @param tracks - Array of tracks to add to the queue
+	 * @param options - Queue playback options
+	 * @param options.autoPlay - Whether to start playing immediately (default: true)
+	 * @param options.crossfadeDurationMs - Duration of crossfade in milliseconds (default: 3000, max: 15000)
+	 * @param options.startIndex - Index to start playing from (default: 0)
+	 * @param options.headers - Custom HTTP headers for audio and artwork requests
+	 */
+	loadQueue(tracks: AudioProTrack[], options: AudioProQueueOptions = {}): void {
+		if (Platform.OS !== 'ios') {
+			console.warn(
+				'[react-native-audio-pro]: Queue methods are currently only available on iOS',
+			);
+			return;
+		}
+
+		if (!tracks || tracks.length === 0) {
+			console.error('[react-native-audio-pro]: Cannot load empty queue');
+			queueEmitter.emit('AudioProQueueEvent', {
+				type: AudioProQueueEventType.QUEUE_ENDED,
+				payload: { currentIndex: 0, queueLength: 0 },
+			});
+			return;
+		}
+
+		// Validate all tracks
+		for (const track of tracks) {
+			if (!validateTrack(track)) {
+				console.error('[react-native-audio-pro]: Invalid track in queue:', track);
+				return;
+			}
+			validateFilePath(track.url);
+			validateFilePath(track.artwork);
+		}
+
+		const { setQueue, setCrossfadeDurationMs, setError, error, configureOptions } =
+			internalStore.getState();
+
+		// Clear any existing error
+		if (error) {
+			setError(null);
+		}
+
+		// Normalize crossfade duration
+		const crossfadeDurationMs = Math.min(
+			MAX_CROSSFADE_DURATION_MS,
+			Math.max(0, options.crossfadeDurationMs ?? DEFAULT_CROSSFADE_DURATION_MS),
+		);
+
+		// Update store
+		setQueue(tracks);
+		setCrossfadeDurationMs(crossfadeDurationMs);
+
+		// Prepare native options
+		const nativeOptions = {
+			...configureOptions,
+			...options,
+			crossfadeDurationMs,
+		};
+
+		logDebug('AudioPro: loadQueue()', tracks.length, 'tracks, options:', nativeOptions);
+
+		NativeAudioPro.loadQueue(tracks, nativeOptions);
+	},
+
+	/**
+	 * Skip to the next track in the queue
+	 * Note: Currently only available on iOS
+	 */
+	skipToNext(): void {
+		if (Platform.OS !== 'ios') {
+			console.warn(
+				'[react-native-audio-pro]: Queue methods are currently only available on iOS',
+			);
+			return;
+		}
+
+		const { queue, currentQueueIndex } = internalStore.getState();
+		if (queue.length === 0) {
+			logDebug('AudioPro: skipToNext() ignored - no queue loaded');
+			return;
+		}
+
+		if (currentQueueIndex >= queue.length - 1) {
+			logDebug('AudioPro: skipToNext() ignored - already at last track');
+			return;
+		}
+
+		logDebug('AudioPro: skipToNext()');
+		NativeAudioPro.skipToNext();
+	},
+
+	/**
+	 * Skip to the previous track in the queue
+	 * Note: Currently only available on iOS
+	 */
+	skipToPrevious(): void {
+		if (Platform.OS !== 'ios') {
+			console.warn(
+				'[react-native-audio-pro]: Queue methods are currently only available on iOS',
+			);
+			return;
+		}
+
+		const { queue } = internalStore.getState();
+		if (queue.length === 0) {
+			logDebug('AudioPro: skipToPrevious() ignored - no queue loaded');
+			return;
+		}
+
+		logDebug('AudioPro: skipToPrevious()');
+		NativeAudioPro.skipToPrevious();
+	},
+
+	/**
+	 * Skip to a specific index in the queue
+	 * Note: Currently only available on iOS
+	 *
+	 * @param index - The index to skip to (0-based)
+	 */
+	skipToQueueIndex(index: number): void {
+		if (Platform.OS !== 'ios') {
+			console.warn(
+				'[react-native-audio-pro]: Queue methods are currently only available on iOS',
+			);
+			return;
+		}
+
+		const { queue } = internalStore.getState();
+		if (queue.length === 0) {
+			logDebug('AudioPro: skipToQueueIndex() ignored - no queue loaded');
+			return;
+		}
+
+		if (index < 0 || index >= queue.length) {
+			console.warn(
+				`[react-native-audio-pro]: skipToQueueIndex(${index}) out of bounds (queue length: ${queue.length})`,
+			);
+			return;
+		}
+
+		logDebug('AudioPro: skipToQueueIndex()', index);
+		NativeAudioPro.skipToQueueIndex(index);
+	},
+
+	/**
+	 * Set the crossfade duration for queue transitions
+	 * Note: Currently only available on iOS
+	 *
+	 * @param durationMs - Crossfade duration in milliseconds (0 to 15000)
+	 */
+	setCrossfadeDuration(durationMs: number): void {
+		if (Platform.OS !== 'ios') {
+			console.warn(
+				'[react-native-audio-pro]: Queue methods are currently only available on iOS',
+			);
+			return;
+		}
+
+		const clampedDuration = Math.min(MAX_CROSSFADE_DURATION_MS, Math.max(0, durationMs));
+		if (clampedDuration !== durationMs) {
+			console.warn(
+				`[react-native-audio-pro]: Crossfade duration ${durationMs}ms out of range, clamped to ${clampedDuration}ms`,
+			);
+		}
+
+		const { setCrossfadeDurationMs } = internalStore.getState();
+		setCrossfadeDurationMs(clampedDuration);
+
+		logDebug('AudioPro: setCrossfadeDuration()', clampedDuration);
+		NativeAudioPro.setCrossfadeDuration(clampedDuration);
+	},
+
+	/**
+	 * Get the current queue
+	 *
+	 * @returns Array of tracks in the queue
+	 */
+	getQueue(): AudioProTrack[] {
+		return internalStore.getState().queue;
+	},
+
+	/**
+	 * Get the current queue index
+	 *
+	 * @returns Current index in the queue (0-based)
+	 */
+	getCurrentQueueIndex(): number {
+		return internalStore.getState().currentQueueIndex;
+	},
+
+	/**
+	 * Get the current crossfade duration
+	 *
+	 * @returns Crossfade duration in milliseconds
+	 */
+	getCrossfadeDuration(): number {
+		return internalStore.getState().crossfadeDurationMs;
+	},
+
+	/**
+	 * Check if a crossfade is currently in progress
+	 *
+	 * @returns True if crossfade is in progress
+	 */
+	isCrossfading(): boolean {
+		return internalStore.getState().isCrossfading;
+	},
+
+	/**
+	 * Clear the queue and stop playback
+	 * Note: Currently only available on iOS
+	 */
+	clearQueue(): void {
+		if (Platform.OS !== 'ios') {
+			console.warn(
+				'[react-native-audio-pro]: Queue methods are currently only available on iOS',
+			);
+			return;
+		}
+
+		const { clearQueue } = internalStore.getState();
+		clearQueue();
+
+		logDebug('AudioPro: clearQueue()');
+		NativeAudioPro.clearQueue();
+	},
+
+	/**
+	 * Pause queue playback
+	 * Note: Currently only available on iOS
+	 */
+	queuePause(): void {
+		if (Platform.OS !== 'ios') {
+			console.warn(
+				'[react-native-audio-pro]: Queue methods are currently only available on iOS',
+			);
+			return;
+		}
+
+		const { queue } = internalStore.getState();
+		if (queue.length === 0) {
+			logDebug('AudioPro: queuePause() ignored - no queue loaded');
+			return;
+		}
+
+		logDebug('AudioPro: queuePause()');
+		NativeAudioPro.queuePause();
+	},
+
+	/**
+	 * Resume queue playback
+	 * Note: Currently only available on iOS
+	 */
+	queueResume(): void {
+		if (Platform.OS !== 'ios') {
+			console.warn(
+				'[react-native-audio-pro]: Queue methods are currently only available on iOS',
+			);
+			return;
+		}
+
+		const { queue } = internalStore.getState();
+		if (queue.length === 0) {
+			logDebug('AudioPro: queueResume() ignored - no queue loaded');
+			return;
+		}
+
+		logDebug('AudioPro: queueResume()');
+		NativeAudioPro.queueResume();
+	},
+
+	/**
+	 * Seek to a position within the current queue track
+	 * Note: Currently only available on iOS
+	 *
+	 * @param positionMs - Position in milliseconds
+	 */
+	queueSeekTo(positionMs: number): void {
+		if (Platform.OS !== 'ios') {
+			console.warn(
+				'[react-native-audio-pro]: Queue methods are currently only available on iOS',
+			);
+			return;
+		}
+
+		const { queue } = internalStore.getState();
+		if (queue.length === 0) {
+			logDebug('AudioPro: queueSeekTo() ignored - no queue loaded');
+			return;
+		}
+
+		if (positionMs < 0) {
+			return;
+		}
+
+		logDebug('AudioPro: queueSeekTo()', positionMs);
+		NativeAudioPro.queueSeekTo(positionMs);
+	},
+
+	/**
+	 * Add a listener for queue events
+	 * Note: Currently only available on iOS
+	 *
+	 * @param callback - Callback function to handle queue events
+	 * @returns Subscription that can be used to remove the listener
+	 */
+	addQueueListener(callback: AudioProQueueEventCallback) {
+		return queueEmitter.addListener('AudioProQueueEvent', callback);
 	},
 };

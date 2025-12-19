@@ -76,9 +76,35 @@ export enum AudioProAmbientEventType {
 }
 
 /**
+ * Types of events that can be emitted by the queue system
+ */
+export enum AudioProQueueEventType {
+	/** Queue has changed (track added, removed, or reordered) */
+	QUEUE_CHANGED = 'QUEUE_CHANGED',
+	/** Queue has ended (last track finished) */
+	QUEUE_ENDED = 'QUEUE_ENDED',
+	/** Crossfade transition has started */
+	CROSSFADE_STARTED = 'CROSSFADE_STARTED',
+	/** Crossfade transition has completed */
+	CROSSFADE_COMPLETED = 'CROSSFADE_COMPLETED',
+	/** Track in queue has changed */
+	QUEUE_TRACK_CHANGED = 'QUEUE_TRACK_CHANGED',
+}
+
+/**
  * Default skip interval in milliseconds (30 seconds)
  */
 export const DEFAULT_SKIP_INTERVAL_MS = 30000;
+
+/**
+ * Default crossfade duration in milliseconds (3 seconds)
+ */
+export const DEFAULT_CROSSFADE_DURATION_MS = 3000;
+
+/**
+ * Maximum crossfade duration in milliseconds (15 seconds)
+ */
+export const MAX_CROSSFADE_DURATION_MS = 15000;
 
 /**
  * Default configuration options for the audio player

@@ -52,6 +52,18 @@ export type {
 	AudioProAmbientEvent,
 	/** Payload for ambient audio error events */
 	AudioProAmbientErrorPayload,
+
+	// Queue types
+	/** Options for queue playback */
+	AudioProQueueOptions,
+	/** Callback function type for queue events */
+	AudioProQueueEventCallback,
+	/** Type of queue events that can be emitted */
+	AudioProQueueEvent,
+	/** Payload for queue changed events */
+	AudioProQueueChangedPayload,
+	/** Payload for crossfade events */
+	AudioProCrossfadePayload,
 } from './types';
 
 /**
@@ -67,4 +79,6 @@ export {
 	AudioProContentType,
 	/** Types of ambient audio events */
 	AudioProAmbientEventType,
+	/** Types of queue events */
+	AudioProQueueEventType,
 } from './values';
