@@ -123,7 +123,6 @@
 	"workspaces": [
 		"example"
 	],
-	"packageManager": "yarn@3.6.1",
 	"dependencies": {
 		"zustand": "^5.0.3"
 	}
