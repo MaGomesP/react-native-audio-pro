@@ -71,6 +71,17 @@ export type AudioProQueueOptions = {
 	startIndex?: number;
 };
 
+export type AudioProAddToQueueOptions = {
+	/** Position to insert the track (default: end of queue) */
+	position?: number;
+	/** Custom HTTP headers for audio and artwork requests */
+	headers?: AudioProHeaders;
+	/** Whether to start playing immediately if queue is empty (default: true) */
+	autoPlay?: boolean;
+	/** Duration of crossfade transition in milliseconds (only used if queue is empty, default: 3000) */
+	crossfadeDurationMs?: number;
+};
+
 // ==============================
 // EVENTS
 // ==============================

@@ -22,6 +22,7 @@ import {
 
 import type {
 	AmbientAudioPlayOptions,
+	AudioProAddToQueueOptions,
 	AudioProAmbientEventCallback,
 	AudioProConfigureOptions,
 	AudioProEventCallback,
@@ -575,6 +576,56 @@ export const AudioPro = {
 		logDebug('AudioPro: loadQueue()', tracks.length, 'tracks, options:', nativeOptions);
 
 		NativeAudioPro.loadQueue(tracks, nativeOptions);
+	},
+
+	/**
+	 * Add a track to the queue
+	 * If the queue is empty, this will initialize the queue with the track and start playback.
+	 * If the track is added at the next position (currentIndex + 1), it will be pre-buffered.
+	 * Note: Currently only available on iOS
+	 *
+	 * @param track - Track to add to the queue
+	 * @param options - Options for adding to queue
+	 * @param options.position - Position to insert the track (default: end of queue)
+	 * @param options.headers - Custom HTTP headers for audio and artwork requests
+	 * @param options.autoPlay - Whether to start playing if queue is empty (default: true)
+	 * @param options.crossfadeDurationMs - Crossfade duration if queue is empty (default: 3000)
+	 */
+	addToQueue(track: AudioProTrack, options: AudioProAddToQueueOptions = {}): void {
+		if (Platform.OS !== 'ios') {
+			console.warn(
+				'[react-native-audio-pro]: Queue methods are currently only available on iOS',
+			);
+			return;
+		}
+
+		if (!validateTrack(track)) {
+			console.error('[react-native-audio-pro]: Invalid track provided to addToQueue:', track);
+			return;
+		}
+
+		validateFilePath(track.url);
+		validateFilePath(track.artwork);
+
+		const { addTrackToQueue, queue } = internalStore.getState();
+
+		// Update local store
+		addTrackToQueue(track, options.position);
+
+		// Prepare native options
+		const nativeOptions = {
+			...options,
+			crossfadeDurationMs: options.crossfadeDurationMs ?? DEFAULT_CROSSFADE_DURATION_MS,
+		};
+
+		logDebug(
+			'AudioPro: addToQueue()',
+			track.title,
+			'at position:',
+			options.position ?? queue.length,
+		);
+
+		NativeAudioPro.addToQueue(track, nativeOptions);
 	},
 
 	/**

@@ -2252,6 +2252,63 @@ class AudioPro: RCTEventEmitter {
 	}
 
 	/**
+	 * Add a track to the queue
+	 * If position is not specified, adds to the end of the queue
+	 * If the track is added at the next position (currentIndex + 1), it will be pre-buffered
+	 */
+	@objc(addToQueue:withOptions:)
+	func addToQueue(track: NSDictionary, options: NSDictionary) {
+		let position = options["position"] as? Int
+
+		// If not in queue mode, initialize queue mode with this track
+		if !isQueueMode {
+			log("addToQueue: Not in queue mode, initializing with single track")
+
+			// Start queue mode with this single track
+			let tracks: NSArray = [track]
+			let queueOptions: NSDictionary = [
+				"autoPlay": options["autoPlay"] as? Bool ?? true,
+				"crossfadeDurationMs": options["crossfadeDurationMs"] as? Double ?? crossfadeDurationMs,
+				"headers": options["headers"] as Any
+			]
+			loadQueue(tracks: tracks, options: queueOptions)
+			return
+		}
+
+		// Calculate insert position
+		let insertPosition: Int
+		if let pos = position {
+			// Clamp position to valid range
+			insertPosition = max(0, min(pos, queue.count))
+		} else {
+			// Default: add to end
+			insertPosition = queue.count
+		}
+
+		log("Adding track to queue at position", insertPosition, "(queue size:", queue.count, ")")
+
+		// Insert track into queue
+		queue.insert(track, at: insertPosition)
+
+		// Update headers if provided
+		if let headers = options["headers"] as? NSDictionary {
+			// Merge headers with existing options
+			var updatedOptions = queuePlaybackOptions as? [String: Any] ?? [:]
+			updatedOptions["headers"] = headers
+			queuePlaybackOptions = updatedOptions as NSDictionary
+		}
+
+		// If the new track is at the next position, pre-buffer it
+		if insertPosition == currentQueueIndex + 1 {
+			log("Pre-buffering newly added track at next position")
+			loadTrackIntoPlayer(isPlayerA: !activePlayerIsA, trackIndex: insertPosition, startPlayback: false)
+		}
+
+		// Emit queue changed event
+		sendQueueEvent(type: EVENT_TYPE_QUEUE_CHANGED, payload: buildQueueInfoPayload())
+	}
+
+	/**
 	 * Clear the queue and reset to single-track mode
 	 */
 	@objc(clearQueue)

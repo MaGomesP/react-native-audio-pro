@@ -23,6 +23,7 @@ RCT_EXTERN_METHOD(ambientSeekTo:(double)positionMs)
 
 // Queue methods
 RCT_EXTERN_METHOD(loadQueue:(NSArray *)tracks withOptions:(NSDictionary *)options)
+RCT_EXTERN_METHOD(addToQueue:(NSDictionary *)track withOptions:(NSDictionary *)options)
 RCT_EXTERN_METHOD(skipToNext)
 RCT_EXTERN_METHOD(skipToPrevious)
 RCT_EXTERN_METHOD(skipToQueueIndex:(int)index)

@@ -24,6 +24,7 @@ jest.mock('react-native', () => ({
 			clear: jest.fn(),
 			// Queue methods
 			loadQueue: jest.fn(),
+			addToQueue: jest.fn(),
 			skipToNext: jest.fn(),
 			skipToPrevious: jest.fn(),
 			skipToQueueIndex: jest.fn(),
@@ -72,6 +73,7 @@ const mockActions = {
 	updateFromEvent: jest.fn(),
 	// Queue actions
 	setQueue: jest.fn(),
+	addTrackToQueue: jest.fn(),
 	setCurrentQueueIndex: jest.fn(),
 	setCrossfadeDurationMs: jest.fn(),
 	setIsCrossfading: jest.fn(),

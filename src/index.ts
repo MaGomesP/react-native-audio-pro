@@ -56,6 +56,8 @@ export type {
 	// Queue types
 	/** Options for queue playback */
 	AudioProQueueOptions,
+	/** Options for adding a track to the queue */
+	AudioProAddToQueueOptions,
 	/** Callback function type for queue events */
 	AudioProQueueEventCallback,
 	/** Type of queue events that can be emitted */

@@ -43,6 +43,7 @@ export interface AudioProStore {
 	setError: (error: AudioProPlaybackErrorPayload | null) => void;
 	// Queue actions
 	setQueue: (tracks: AudioProTrack[]) => void;
+	addTrackToQueue: (track: AudioProTrack, position?: number) => void;
 	setCurrentQueueIndex: (index: number) => void;
 	setCrossfadeDurationMs: (duration: number) => void;
 	setIsCrossfading: (isCrossfading: boolean) => void;
@@ -77,6 +78,14 @@ export const internalStore = create<AudioProStore>((set, get) => ({
 	setError: (error) => set({ error }),
 	// Queue actions
 	setQueue: (tracks) => set({ queue: tracks, currentQueueIndex: 0 }),
+	addTrackToQueue: (track, position) => {
+		const { queue } = get();
+		const insertPosition =
+			position !== undefined ? Math.max(0, Math.min(position, queue.length)) : queue.length;
+		const newQueue = [...queue];
+		newQueue.splice(insertPosition, 0, track);
+		set({ queue: newQueue });
+	},
 	setCurrentQueueIndex: (index) => set({ currentQueueIndex: index }),
 	setCrossfadeDurationMs: (duration) => set({ crossfadeDurationMs: duration }),
 	setIsCrossfading: (isCrossfading) => set({ isCrossfading }),
